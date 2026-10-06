@@ -39,6 +39,7 @@ def _segment_out(seg: Segment) -> SegmentOut:
         pay=_fraction_out(seg.pay),
         exception_id=seg.exception_id,
         exception_kind=seg.exception_kind,
+        is_break=seg.is_break,
     )
 
 
@@ -60,15 +61,22 @@ def calculate(req: ShiftRequest) -> CalculateResponse:
         )
         for r in req.rules
     ]
+    # 计薪段与休息段来自同一次逐分钟裁决（休息分钟工资直接为 0，
+    # 绝不先按旧规则算总额再事后扣减）
     segments, total = slice_shift(
         req.start,
         req.end,
         req.base_rate_cents,
         rules,
         [e.to_window() for e in req.exceptions],
+        [b.to_window() for b in req.breaks],
     )
+    paid_minutes = sum(s.minutes for s in segments if not s.is_break)
+    break_minutes = sum(s.minutes for s in segments if s.is_break)
     return CalculateResponse(
         segments=[_segment_out(s) for s in segments],
         total=_fraction_out(total),
         total_minutes=sum(s.minutes for s in segments),
+        paid_minutes=paid_minutes,
+        break_minutes=break_minutes,
     )

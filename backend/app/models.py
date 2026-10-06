@@ -10,14 +10,18 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from .engine import (
     MAX_EXCEPTION_END_MINUTE,
     MINUTES_PER_DAY,
+    BreakWindow,
     ExceptionWindow,
     REPLACE,
     SUPPRESS,
+    breaks_outside_shift,
+    find_overlapping_breaks,
     find_overlapping_exceptions,
 )
 
 MAX_RULES = 20
 MAX_EXCEPTIONS = 10
+MAX_BREAKS = 10
 
 
 def to_camel(s: str) -> str:
@@ -105,6 +109,35 @@ class ExceptionIn(CamelModel):
         )
 
 
+class BreakIn(CamelModel):
+    """经批准的不计薪休息：真实本地分钟时间上的半开区间 [start, end)。
+
+    休息没有倍率字段：休息分钟一律不计薪，但响应仍保留其原本命中的周规则/例外。
+    必须整体落在值班区间内（含与值班起止相接）、精确到分钟、结束晚于开始。
+    """
+
+    start: datetime
+    end: datetime
+
+    @field_validator("start", "end")
+    @classmethod
+    def naive_local(cls, v: datetime) -> datetime:
+        if v.tzinfo is not None:
+            raise ValueError("时间必须为不带时区的本地时间")
+        if v.second != 0 or v.microsecond != 0:
+            raise ValueError("时间精确到分钟")
+        return v
+
+    @model_validator(mode="after")
+    def window_positive(self) -> "BreakIn":
+        if self.end <= self.start:
+            raise ValueError("休息结束时间必须晚于开始时间（相接请使用两段休息）")
+        return self
+
+    def to_window(self) -> BreakWindow:
+        return BreakWindow(start=self.start, end=self.end)
+
+
 class ShiftRequest(CamelModel):
     start: datetime
     end: datetime
@@ -112,10 +145,17 @@ class ShiftRequest(CamelModel):
     rules: list[RuleIn] = Field(max_length=MAX_RULES, default_factory=list)
     # 显式 null 等价于缺省（旧客户端不传该字段），统一归一化为空列表
     exceptions: list[ExceptionIn] = Field(max_length=MAX_EXCEPTIONS, default_factory=list)
+    # 经批准的不计薪休息（至多 10 段）；缺省 / null / [] 均走旧流程
+    breaks: list[BreakIn] = Field(max_length=MAX_BREAKS, default_factory=list)
 
     @field_validator("exceptions", mode="before")
     @classmethod
     def null_exceptions_means_empty(cls, v):
+        return [] if v is None else v
+
+    @field_validator("breaks", mode="before")
+    @classmethod
+    def null_breaks_means_empty(cls, v):
         return [] if v is None else v
 
     @field_validator("start", "end")
@@ -148,6 +188,18 @@ class ShiftRequest(CamelModel):
         if pairs:
             detail = "、".join(f"{a} ↔ {b}" for a, b in pairs)
             raise ValueError(f"一次性例外窗口在真实时间线上重叠（相接不视为重叠）：{detail}")
+        # 休息：越界、正时长重叠 → 整次请求拒绝；相接合法
+        break_windows = [b.to_window() for b in self.breaks]
+        outside = breaks_outside_shift(self.start, self.end, break_windows)
+        if outside:
+            b = outside[0]
+            raise ValueError(
+                f"休息 [{b.start:%Y-%m-%d %H:%M}, {b.end:%Y-%m-%d %H:%M}) 越界："
+                f"必须整体位于值班区间 [{self.start:%Y-%m-%d %H:%M}, {self.end:%Y-%m-%d %H:%M}) 内")
+        break_pairs = find_overlapping_breaks(break_windows)
+        if break_pairs:
+            detail = "、".join(f"[{a:%m-%d %H:%M}, {b:%m-%d %H:%M})" for a, b in break_pairs)
+            raise ValueError(f"休息时间在真实时间线上重叠（相接不视为重叠）：{detail}")
         return self
 
 
@@ -169,9 +221,15 @@ class SegmentOut(CamelModel):
     # ruleId 仍记录被压过的周规则（可能为 null），仅作解释用途
     exception_id: Optional[str] = None
     exception_kind: Optional[Literal["SUPPRESS", "REPLACE"]] = None
+    # true 表示该段为经批准的不计薪休息：pay 恒为 0，其余字段保留该段分钟
+    # 原本命中的周规则/例外（休息优先于一切倍率规则），仅供复核解释
+    is_break: bool = False
 
 
 class CalculateResponse(CamelModel):
     segments: list[SegmentOut]
     total: FractionOut
     total_minutes: int
+    # 计薪分钟与休息分钟分项汇总（totalMinutes = paidMinutes + breakMinutes）
+    paid_minutes: int = 0
+    break_minutes: int = 0

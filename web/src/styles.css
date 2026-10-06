@@ -170,6 +170,8 @@ button.danger { color: var(--danger); border-color: #e3b2ae; padding: 4px 10px; 
 :root {
   --seg-exc-replace: #7c5cff;
   --seg-exc-suppress: #5aa9e6;
+  /* 经批准的不计薪休息：醒目的斜纹感中性色 */
+  --seg-break: #9aa3b2;
 }
 .exc-head { margin-top: 22px; border-top: 1px dashed var(--border); padding-top: 14px; }
 .exc-card { border-color: #b9a6f5; background: #f8f6ff; }
@@ -177,6 +179,20 @@ button.danger { color: var(--danger); border-color: #e3b2ae; padding: 4px 10px; 
 .seg-table .exception-row { background: #f4f1ff; }
 .seg-table .exception-row strong { color: #4b32c3; }
 .seg-table .muted-cell { color: var(--muted); }
+.seg-table .sub-muted { color: var(--muted); font-size: 12px; }
+
+/* 经批准的不计薪休息 */
+.break-head { margin-top: 22px; border-top: 1px dashed var(--border); padding-top: 14px; }
+.break-card { border-color: #8d97a8; background: #f3f5f8; }
+.break-card legend { color: #4a5568; }
+.timeline-seg.break {
+  border-right: 2px dashed rgba(0,0,0,.55);
+  background-image: repeating-linear-gradient(
+    45deg, transparent 0 6px, rgba(255,255,255,.35) 6px 12px);
+}
+.timeline-seg.break .timeline-label { color: #1f2933; }
+.seg-table .break-row { background: #eceff3; font-style: normal; }
+.seg-table .break-row strong { color: #4a5568; }
 select {
   padding: 7px 9px;
   border: 1px solid var(--border);

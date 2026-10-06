@@ -15,6 +15,14 @@
 - 例外优先于一切周规则；窗口之外仍按周规则的 priority/id 裁决。
 - 两个例外窗口在真实时间线上有正时长重叠（相接不算）时，整次请求拒绝，
   裁决绝不依赖输入顺序。
+
+经批准的不计薪休息：
+- 休息用真实本地分钟时间的半开区间 ``[start, end)`` 直接给出，必须整体落在值班区间内。
+- 休息优先于**所有**倍率规则（含一次性例外）：休息分钟工资为 0，但裁决仍保留该分钟
+  原本命中的周规则/例外（rule_id、basis_points、exception_id、exception_kind），
+  仅供复核员解释「为什么这一分钟没有计费」。
+- 休息允许相接（end == start）；正时长重叠、越界或非法时间在请求层整次拒绝。
+- 休息跨午夜时与所有段一样在 00:00 断段。
 """
 
 from __future__ import annotations
@@ -126,18 +134,75 @@ def find_overlapping_exceptions(exceptions: list[ExceptionWindow]) -> list[tuple
 
 
 @dataclass(frozen=True)
+class BreakWindow:
+    """经批准的不计薪休息：真实本地分钟时间上的半开区间 [start, end)。
+
+    休息没有自己的倍率：休息分钟工资为 0，但其所在分钟原本命中的周规则/例外
+    仍照常裁决并随休息段一起返回，供复核员解释。
+    """
+
+    start: datetime
+    end: datetime
+
+    def covers(self, minute: datetime) -> bool:
+        return self.start <= minute < self.end
+
+
+class BreakOverlapError(ValueError):
+    """两段休息在真实时间线上正时长重叠。报错与输入顺序无关。"""
+
+    def __init__(self, pairs: list[tuple[datetime, datetime]]):
+        self.pairs = pairs
+        detail = "、".join(f"[{_fmt(a)}, {_fmt(b)})" for a, b in pairs)
+        super().__init__(f"休息时间在真实时间线上重叠（相接不视为重叠）：{detail}")
+
+
+def _fmt(dt: datetime) -> str:
+    return dt.strftime("%Y-%m-%d %H:%M")
+
+
+def find_overlapping_breaks(breaks: list[BreakWindow]) -> list[tuple[datetime, datetime]]:
+    """返回所有真实时间线上正时长重叠的休息端点对。
+
+    相接（a.end == b.start）不算重叠。每对按端点先后规范化，整体按真实时间排序，
+    与休息在请求中的先后顺序完全无关。
+    """
+    pairs: list[tuple[datetime, datetime]] = []
+    for i in range(len(breaks)):
+        ai, a_hi = breaks[i].start, breaks[i].end
+        for j in range(i + 1, len(breaks)):
+            bi, b_hi = breaks[j].start, breaks[j].end
+            if max(ai, bi) < min(a_hi, b_hi):
+                lo, hi = (ai, a_hi) if (ai, a_hi) <= (bi, b_hi) else (bi, b_hi)
+                pairs.append((lo, hi))
+    pairs.sort()
+    return pairs
+
+
+def breaks_outside_shift(
+    start: datetime, end: datetime, breaks: list[BreakWindow]
+) -> list[BreakWindow]:
+    """返回没有整体落在 [start, end) 内的休息（越界即整次拒绝）。"""
+    return [b for b in breaks if not (start <= b.start and b.end <= end)]
+
+
+@dataclass(frozen=True)
 class ChosenRule:
     """一分钟裁决结果。
 
     rule_id 为 None 且 exception_id 也为 None 表示无规则命中（按 10000）。
     exception_id 非空表示该分钟由一次性例外接管（此时 rule_id 仍记录被压过的
     周规则，仅作解释用途，倍率以例外为准）。
+    is_break 为 True 表示该分钟属于经批准的不计薪休息：工资为 0，但其余字段
+    （rule_id / basis_points / exception_id / exception_kind）仍保留该分钟
+    原本命中的周规则与例外，仅作解释用途。
     """
 
     rule_id: Optional[str]
     basis_points: int
     exception_id: Optional[str] = None
     exception_kind: Optional[str] = None
+    is_break: bool = False
 
 
 def choose_weekly_rule(minute: datetime, rules: list[Rule]) -> ChosenRule:
@@ -166,20 +231,33 @@ def choose_rule(
     minute: datetime,
     rules: list[Rule],
     exceptions: Optional[list[ExceptionWindow]] = None,
+    breaks: Optional[list[BreakWindow]] = None,
 ) -> ChosenRule:
-    """对一分钟做完整裁决：例外优先于一切周规则，窗口之外按周规则优先级裁决。"""
+    """对一分钟做完整裁决。
+
+    先照常裁决周规则与一次性例外（例外优先于一切周规则）；休息再覆盖在最上层：
+    命中休息时该分钟不计薪（effective 倍率为 0），但原本命中的规则/例外原样保留。
+    """
     base = choose_weekly_rule(minute, rules)
-    if not exceptions:
-        return base
-    for exc in exceptions:
-        if not exc.covers(minute):
-            continue
-        # 例外窗口在进入引擎前已两两校验不重叠，故命中即唯一。
-        if exc.kind == SUPPRESS:
-            return ChosenRule(rule_id=base.rule_id, basis_points=DEFAULT_BASIS_POINTS,
-                              exception_id=exc.id, exception_kind=SUPPRESS)
-        return ChosenRule(rule_id=base.rule_id, basis_points=exc.basis_points,
-                          exception_id=exc.id, exception_kind=REPLACE)
+    if exceptions:
+        for exc in exceptions:
+            if not exc.covers(minute):
+                continue
+            # 例外窗口在进入引擎前已两两校验不重叠，故命中即唯一。
+            if exc.kind == SUPPRESS:
+                base = ChosenRule(rule_id=base.rule_id, basis_points=DEFAULT_BASIS_POINTS,
+                                  exception_id=exc.id, exception_kind=SUPPRESS)
+            else:
+                base = ChosenRule(rule_id=base.rule_id, basis_points=exc.basis_points,
+                                  exception_id=exc.id, exception_kind=REPLACE)
+            break
+    if breaks:
+        for brk in breaks:
+            # 休息窗口在进入引擎前已两两校验不重叠，故命中即唯一。
+            if brk.covers(minute):
+                return ChosenRule(rule_id=base.rule_id, basis_points=base.basis_points,
+                                  exception_id=base.exception_id,
+                                  exception_kind=base.exception_kind, is_break=True)
     return base
 
 
@@ -194,11 +272,19 @@ class Segment:
     pay: Fraction
     exception_id: Optional[str] = None
     exception_kind: Optional[str] = None
+    # True 表示该段为经批准的不计薪休息：pay 恒为 0，basis_points 等字段保留
+    # 该段分钟原本命中的周规则/例外，仅供复核员解释未计费原因
+    is_break: bool = False
 
 
-def _minute_pay(base_rate_cents: int, basis_points: int) -> Fraction:
-    """单分钟工资 = 时薪 * 倍率 * (1/60)，全程分数精确。"""
-    return Fraction(base_rate_cents * basis_points, BASIS_POINT_DENOMINATOR * MINUTES_PER_HOUR)
+def _segment_pay(
+    minutes: int, base_rate_cents: int, basis_points: int, is_break: bool
+) -> Fraction:
+    """段工资。休息分钟工资为 0（在同一次裁决中直接得到，绝不从总额事后扣减）。"""
+    if is_break:
+        return Fraction(0, 1)
+    return Fraction(minutes * base_rate_cents * basis_points,
+                    BASIS_POINT_DENOMINATOR * MINUTES_PER_HOUR)
 
 
 def slice_shift(
@@ -207,62 +293,39 @@ def slice_shift(
     base_rate_cents: int,
     rules: list[Rule],
     exceptions: Optional[list[ExceptionWindow]] = None,
+    breaks: Optional[list[BreakWindow]] = None,
 ) -> tuple[list[Segment], Fraction]:
     """把 [start, end) 逐分钟切片并归并相邻同类段。
 
     分段键包含日期，因此跨午夜时即使规则相同也会在 00:00 处断开（例外跨午夜
-    延伸到次日的分钟因此自然归入实际次日）。周规则边界、例外边界同样断开。
+    延伸到次日的分钟因此自然归入实际次日，跨午夜休息同样在午夜断段）。
+    周规则边界、例外边界、休息边界同样断开。休息段与计薪段在同一次分钟裁决中
+    一起产生：休息段工资为 0，但保留其分钟原本命中的规则/例外。
     """
     exceptions = exceptions or []
+    breaks = breaks or []
     overlaps = find_overlapping_exceptions(exceptions)
     if overlaps:
         raise ExceptionOverlapError(overlaps)
+    break_overlaps = find_overlapping_breaks(breaks)
+    if break_overlaps:
+        raise BreakOverlapError(break_overlaps)
 
     segments: list[Segment] = []
     total = Fraction(0, 1)
 
     current = start
     current_date = start.date()
-    chosen = choose_rule(current, rules, exceptions)
+    chosen = choose_rule(current, rules, exceptions, breaks)
 
     seg_start = current
     seg_minutes = 0
 
-    while current < end:
-        current_chosen = choose_rule(current, rules, exceptions)
-        # 规则变化、例外变化 或 越过午夜 → 关闭旧段
-        if (
-            current_chosen.rule_id != chosen.rule_id
-            or current_chosen.basis_points != chosen.basis_points
-            or current_chosen.exception_id != chosen.exception_id
-            or current_chosen.exception_kind != chosen.exception_kind
-            or current.date() != current_date
-        ):
-            pay = Fraction(seg_minutes * base_rate_cents * chosen.basis_points,
-                           BASIS_POINT_DENOMINATOR * MINUTES_PER_HOUR)
-            segments.append(Segment(
-                start=seg_start,
-                end=current,
-                minutes=seg_minutes,
-                weekday=seg_start.weekday(),
-                rule_id=chosen.rule_id,
-                basis_points=chosen.basis_points,
-                pay=pay,
-                exception_id=chosen.exception_id,
-                exception_kind=chosen.exception_kind,
-            ))
-            total += pay
-            seg_start = current
-            seg_minutes = 0
-            chosen = current_chosen
-            current_date = current.date()
-
-        seg_minutes += 1
-        current += timedelta(minutes=1)
-
-    if seg_minutes > 0:
-        pay = Fraction(seg_minutes * base_rate_cents * chosen.basis_points,
-                       BASIS_POINT_DENOMINATOR * MINUTES_PER_HOUR)
+    def flush() -> None:
+        nonlocal seg_start, seg_minutes, total
+        if seg_minutes == 0:
+            return
+        pay = _segment_pay(seg_minutes, base_rate_cents, chosen.basis_points, chosen.is_break)
         segments.append(Segment(
             start=seg_start,
             end=current,
@@ -273,7 +336,30 @@ def slice_shift(
             pay=pay,
             exception_id=chosen.exception_id,
             exception_kind=chosen.exception_kind,
+            is_break=chosen.is_break,
         ))
         total += pay
+        seg_start = current
+        seg_minutes = 0
+
+    while current < end:
+        current_chosen = choose_rule(current, rules, exceptions, breaks)
+        # 规则变化、例外变化、休息状态变化 或 越过午夜 → 关闭旧段
+        if (
+            current_chosen.rule_id != chosen.rule_id
+            or current_chosen.basis_points != chosen.basis_points
+            or current_chosen.exception_id != chosen.exception_id
+            or current_chosen.exception_kind != chosen.exception_kind
+            or current_chosen.is_break != chosen.is_break
+            or current.date() != current_date
+        ):
+            flush()
+            chosen = current_chosen
+            current_date = current.date()
+
+        seg_minutes += 1
+        current += timedelta(minutes=1)
+
+    flush()
 
     return segments, total

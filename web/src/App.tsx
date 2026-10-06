@@ -1,14 +1,16 @@
 import { useState } from 'react'
 import { calculate, ApiError } from './api'
-import type { CalculateResponse, ExceptionInput, RuleInput, ValidationIssue } from './types'
+import type { BreakInput, CalculateResponse, ExceptionInput, RuleInput, ValidationIssue } from './types'
 import { RuleEditor } from './components/RuleEditor'
 import { ExceptionEditor } from './components/ExceptionEditor'
+import { BreakEditor } from './components/BreakEditor'
 import { Timeline } from './components/Timeline'
 import { SegmentTable } from './components/SegmentTable'
 import { DEFAULT_RULES, defaultStart, defaultEnd } from './defaults'
 
 const MAX_RULES = 20
 const MAX_EXCEPTIONS = 10
+const MAX_BREAKS = 10
 
 function blankRule(): RuleInput {
   return {
@@ -32,12 +34,17 @@ function blankException(): ExceptionInput {
   }
 }
 
+function blankBreak(): BreakInput {
+  return { start: '2026-09-25T23:00', end: '2026-09-26T00:00' }
+}
+
 export default function App() {
   const [start, setStart] = useState(defaultStart())
   const [end, setEnd] = useState(defaultEnd())
   const [baseRate, setBaseRate] = useState(6000)
   const [rules, setRules] = useState<RuleInput[]>(DEFAULT_RULES)
   const [exceptions, setExceptions] = useState<ExceptionInput[]>([])
+  const [breaks, setBreaks] = useState<BreakInput[]>([])
 
   const [result, setResult] = useState<CalculateResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -55,6 +62,12 @@ export default function App() {
   const addException = () =>
     setExceptions((es) => (es.length >= MAX_EXCEPTIONS ? es : [...es, blankException()]))
 
+  const updateBreak = (i: number, next: BreakInput) =>
+    setBreaks((bs) => bs.map((b, idx) => (idx === i ? next : b)))
+  const removeBreak = (i: number) => setBreaks((bs) => bs.filter((_, idx) => idx !== i))
+  const addBreak = () =>
+    setBreaks((bs) => (bs.length >= MAX_BREAKS ? bs : [...bs, blankBreak()]))
+
   /** 任何新的提交都先清除旧结果，避免复核员误看陈旧数据。 */
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -70,6 +83,8 @@ export default function App() {
         rules,
         // 未提交例外时不带该字段：后端按旧周规则流程返回，旧结果逐项不变
         exceptions: exceptions.length > 0 ? exceptions : undefined,
+        // 未提交休息时同样不带该字段：旧分段与总额逐项不变
+        breaks: breaks.length > 0 ? breaks : undefined,
       })
       setResult(res)
     } catch (err) {
@@ -90,7 +105,7 @@ export default function App() {
         <h1>值班津贴复核台</h1>
         <p className="subtitle">
           精确到分钟 · 同一分钟只取最高 priority（并列取 id 的 UTF-8 字节序最小者）·
-          一次性例外优先于周规则 · 分数计费不四舍五入
+          一次性例外优先于周规则 · 经批准休息不计薪但保留原始命中 · 分数计费不四舍五入
         </p>
       </header>
 
@@ -185,6 +200,38 @@ export default function App() {
           )}
         </div>
 
+        <div className="rules-head break-head">
+          <h2>经批准的不计薪休息（{breaks.length}/{MAX_BREAKS}）</h2>
+          <button
+            type="button"
+            onClick={addBreak}
+            disabled={breaks.length >= MAX_BREAKS}
+            data-testid="add-break"
+          >
+            + 添加休息
+          </button>
+        </div>
+        <p className="empty-hint">
+          休息用真实本地分钟时间的半开区间表示，可跨午夜（午夜处照常断段），必须整体位于值班区间内，
+          至多 {MAX_BREAKS} 段；相接允许，<strong>正时长重叠、越界将整次拒绝</strong>。
+          休息优先于<strong>所有倍率规则与一次性例外</strong>：休息分钟工资为 <strong>0</strong>，
+          但明细仍保留这些分钟原本命中的周规则/例外，供复核员解释未计费原因。
+        </p>
+        <div className="rules-list">
+          {breaks.map((brk, i) => (
+            <BreakEditor
+              key={i}
+              index={i}
+              breakValue={brk}
+              onChange={(next) => updateBreak(i, next)}
+              onRemove={() => removeBreak(i)}
+            />
+          ))}
+          {breaks.length === 0 && (
+            <p className="empty-hint">暂无休息：全部分钟按命中的规则/例外计薪。</p>
+          )}
+        </div>
+
         <button type="submit" className="primary" disabled={submitting} data-testid="submit">
           {submitting ? '切片计算中…' : '精确切片并复核'}
         </button>
@@ -219,7 +266,10 @@ export default function App() {
                 </strong>
               </div>
               <div className="decimal-hint">约 {result.total.decimal} 分（仅展示，不参与计算）</div>
-              <div className="total-min">共 {result.totalMinutes} 分钟，{result.segments.length} 段</div>
+              <div className="total-min">
+                共 {result.totalMinutes} 分钟（计薪 {result.paidMinutes} 分钟 ·
+                休息 {result.breakMinutes} 分钟），{result.segments.length} 段
+              </div>
             </div>
           </div>
 
@@ -236,12 +286,17 @@ export default function App() {
                 仍并列取规则 id 的 UTF-8 字节序最小者，无命中按 10000。
               </li>
               <li>
-                相邻且裁决结果相同的分钟归并为一段；午夜 00:00 一定断开
-                （例外跨午夜的分钟因此归入实际次日），周规则边界、例外边界同样断开。
+                经批准的休息覆盖在所有倍率规则最上层：休息分钟<strong>工资为 0</strong>，
+                但该分钟原本命中的周规则/例外（含被压过的规则 id 与倍率）仍在该行保留。
               </li>
               <li>
-                段工资 = 分钟数 × 时薪(分) × basisPoints / (10000 × 60)，全程用不可约分数累加，
-                总额是各段分数之和，中途不做任何四舍五入。
+                相邻且裁决结果相同的分钟归并为一段；午夜 00:00 一定断开
+                （例外、休息跨午夜的分钟因此归入实际次日），周规则边界、例外边界、休息边界同样断开。
+              </li>
+              <li>
+                段工资 = 分钟数 × 时薪(分) × basisPoints / (10000 × 60)，休息段为 0；
+                计薪段与休息段在同一次分钟裁决中一起产生，全程用不可约分数累加，
+                总额只累计计薪分钟，中途不做任何四舍五入或事后扣减。
               </li>
             </ol>
           </details>

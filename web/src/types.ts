@@ -19,12 +19,18 @@ export interface ExceptionInput {
   basisPoints: number | null
 }
 
+export interface BreakInput {
+  start: string // 真实本地分钟时间 datetime-local（YYYY-MM-DDTHH:MM）
+  end: string // 半开：不含 end 这一分钟；必须整体落在值班区间内
+}
+
 export interface ShiftPayload {
   start: string
   end: string
   baseRateCents: number
   rules: RuleInput[]
   exceptions?: ExceptionInput[]
+  breaks?: BreakInput[]
 }
 
 export interface FractionJson {
@@ -44,12 +50,16 @@ export interface SegmentJson {
   // 非 null 表示该分钟由一次性例外接管；ruleId 仍记录被压过的周规则（仅解释用）
   exceptionId: string | null
   exceptionKind: ExceptionKind | null
+  // true 表示该段为经批准的不计薪休息：pay 为 0，其余字段保留原本命中的规则/例外
+  isBreak: boolean
 }
 
 export interface CalculateResponse {
   segments: SegmentJson[]
   total: FractionJson
   totalMinutes: number
+  paidMinutes: number
+  breakMinutes: number
 }
 
 export interface ValidationIssue {
