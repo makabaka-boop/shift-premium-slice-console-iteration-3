@@ -39,6 +39,7 @@ def _segment_out(seg: Segment) -> SegmentOut:
         pay=_fraction_out(seg.pay),
         exception_id=seg.exception_id,
         exception_kind=seg.exception_kind,
+        is_break=seg.is_break,
     )
 
 
@@ -66,9 +67,14 @@ def calculate(req: ShiftRequest) -> CalculateResponse:
         req.base_rate_cents,
         rules,
         [e.to_window() for e in req.exceptions],
+        [b.to_window() for b in req.breaks],
     )
+    total_minutes = sum(s.minutes for s in segments)
+    paid_minutes = sum(s.minutes for s in segments if not s.is_break)
     return CalculateResponse(
         segments=[_segment_out(s) for s in segments],
         total=_fraction_out(total),
-        total_minutes=sum(s.minutes for s in segments),
+        total_minutes=total_minutes,
+        paid_minutes=paid_minutes,
+        break_minutes=total_minutes - paid_minutes,
     )

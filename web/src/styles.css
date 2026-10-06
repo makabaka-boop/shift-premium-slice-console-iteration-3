@@ -192,3 +192,15 @@ input[type="date"] {
   font-size: 14px;
   font-family: inherit;
 }
+
+/* 不计薪休息 */
+:root {
+  --seg-break: #aeb6c2;
+  --seg-break-hi: #c9cfda;
+}
+.break-head { margin-top: 22px; border-top: 1px dashed var(--border); padding-top: 14px; }
+.break-card { border-color: #9aa4b2; background: #f4f6f8; }
+.break-card legend { color: #52606d; }
+.timeline-seg.brk { border-right: 2px dashed rgba(0,0,0,.4); color: #3e4756; }
+.seg-table .break-row { background: #eceff3; }
+.seg-table .break-row strong { color: #52606d; }
