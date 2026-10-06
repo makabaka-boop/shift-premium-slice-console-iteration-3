@@ -1,0 +1,19 @@
+services:
+  api:
+    build: ./backend
+    container_name: duty-api
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  web:
+    build: ./web
+    container_name: duty-web
+    ports:
+      - "8080:80"
+    depends_on:
+      - api
